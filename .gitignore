@@ -1,0 +1,6 @@
+/target
+/Output
+agente.toml
+*.bak
+*.bak-*
+/backup-*

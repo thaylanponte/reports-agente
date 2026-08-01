@@ -1,0 +1,36 @@
+[package]
+name = "report-studio-agente"
+# Esta versão não é cosmética: vai no campo `versao` do MensagemAgente::Autenticar
+# (agent.rs) e na linha de subida do log de cada binário. É por ela que se
+# descobre qual máquina recebeu qual build. Bumpar a cada release é obrigatório,
+# senão binário novo e binário velho se reportam iguais.
+version = "0.5.0"
+edition = "2021"
+
+[[bin]]
+name = "agente"
+path = "src/main.rs"
+
+[[bin]]
+name = "agente-service"
+path = "src/main_service.rs"
+
+[dependencies]
+tokio             = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures-util      = "0.3"
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+odbc-api          = "8"
+toml              = "0.8"
+eframe            = "0.29"
+chrono            = "0.4"
+rand              = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
+windows-sys     = { version = "0.59", features = ["Win32_UI_Shell", "Win32_Foundation"] }
+
+[profile.release]
+opt-level = 3
+strip     = true
