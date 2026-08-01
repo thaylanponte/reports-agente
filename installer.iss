@@ -13,7 +13,7 @@
 ; ============================================================================
 
 #define AppName "Report Studio Agent"
-#define AppVersion "0.4.0"
+#define AppVersion "0.5.0"
 #define AppPublisher "Guidetti Consultoria"
 #define AppExeName "agente.exe"
 #define ServiceExeName "agente-service.exe"
@@ -28,7 +28,7 @@ DefaultDirName={autopf}\Report Studio Agent
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir=.\Output
-OutputBaseFilename=ReportStudioAgentSetup
+OutputBaseFilename=ReportStudioAgentSetup-{#AppVersion}
 Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
