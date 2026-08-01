@@ -43,10 +43,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Dirs]
 Name: "{commonappdata}\Report Studio Agent"; Permissions: users-modify
+Name: "{commonappdata}\Report Studio Agent\logs"; Permissions: users-modify
 
 [Files]
-Source: "target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "target\release\{#ServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "target\x86_64-pc-windows-gnu\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "target\x86_64-pc-windows-gnu\release\{#ServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
@@ -101,6 +102,44 @@ begin
       Empresa := ExtrairValor(L)
     else if Pos('token', L) = 1 then
       Token := ExtrairValor(L);
+  end;
+end;
+
+{ Coleta as linhas do agente.toml existente que NAO sao as tres chaves geridas
+  por este instalador, devolvendo-as verbatim (comentarios e espacamento
+  inclusive) para serem reanexadas ao arquivo novo.
+
+  Motivo: CurStepChanged reescreve o arquivo do zero e SaveStringToFile com
+  False sobrescreve. O agente 0.5.0 aceita max_consultas e max_exportacoes no
+  mesmo arquivo, ajustaveis a mao quando o DB2 de um cliente esta sofrendo — e
+  sao os unicos parametros do agente que afetam o sistema de caixa da loja. Sem
+  esta funcao, essa valvula so funcionaria ate a proxima atualizacao.
+
+  LIMITACAO CONHECIDA: a deteccao usa Pos(chave, L) = 1, a mesma convencao de
+  LerConfigExistente. Uma chave futura que COMECE com 'servidor_url',
+  'empresa_id' ou 'token' — 'token_backup', por exemplo — seria considerada
+  gerida por este instalador e portanto descartada. A convencao foi mantida por
+  coerencia com o resto do arquivo; se surgir uma chave assim, os dois lugares
+  precisam mudar juntos. }
+function LerLinhasExtras(): String;
+var
+  ConfigFile: String;
+  Linhas: TArrayOfString;
+  i: Integer;
+  L: String;
+begin
+  Result := '';
+  ConfigFile := ExpandConstant('{commonappdata}\Report Studio Agent\agente.toml');
+  if not LoadStringsFromFile(ConfigFile, Linhas) then
+    Exit;
+  for i := 0 to GetArrayLength(Linhas) - 1 do
+  begin
+    L := Trim(Linhas[i]);
+    if Pos('servidor_url', L) = 1 then Continue;
+    if Pos('empresa_id', L) = 1 then Continue;
+    if Pos('token', L) = 1 then Continue;
+    { Linha original, nao a trimada: preserva indentacao e alinhamento. }
+    Result := Result + Linhas[i] + #13#10;
   end;
 end;
 
@@ -167,7 +206,7 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  ConfigDir, ConfigFile, Conteudo: String;
+  ConfigDir, ConfigFile, Conteudo, Extras: String;
   Url, Empresa, Token: String;
   ResultCode: Integer;
 begin
@@ -187,10 +226,14 @@ begin
     ConfigDir := ExpandConstant('{commonappdata}\Report Studio Agent');
     ForceDirectories(ConfigDir);
     ConfigFile := ConfigDir + '\agente.toml';
+    { Le ANTES de sobrescrever: preserva max_consultas, max_exportacoes e
+      qualquer comentario que o operador tenha deixado no arquivo. }
+    Extras := LerLinhasExtras();
     Conteudo :=
       'servidor_url = "' + Url + '"' + #13#10 +
       'empresa_id   = "' + Empresa + '"' + #13#10 +
-      'token        = "' + Token + '"' + #13#10;
+      'token        = "' + Token + '"' + #13#10 +
+      Extras;
     SaveStringToFile(ConfigFile, Conteudo, False);
   end;
 
@@ -198,7 +241,25 @@ begin
   // configurados dentro do proprio 'install').
   if WizardIsTaskSelected('installservice') then
   begin
-    Exec(ExpandConstant('{app}\{#ServiceExeName}'), 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+    if not Exec(ExpandConstant('{app}\{#ServiceExeName}'), 'install', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      ResultCode := -1;
+
+    { O 'install' configura failureflag, acoes de restart e delayed-auto. Quando
+      alguma dessas falha, ele imprime um banner no console — que SW_HIDE torna
+      invisivel. Sem checar o codigo aqui, o instalador reportaria sucesso e o
+      cliente ficaria sem recuperacao automatica sem ninguem saber.
+
+      Nao aborta a instalacao de proposito: o binario ja esta no lugar e o
+      agente funciona. O que pode faltar e so o levantar-se sozinho apos uma
+      queda. }
+    if ResultCode <> 0 then
+      MsgBox('O servico foi instalado, mas o comando retornou codigo ' + IntToStr(ResultCode) + '.' + #13#10 + #13#10 +
+             'O agente funciona normalmente, porem a recuperacao automatica pode nao ter sido ' +
+             'configurada: se o servico cair, o Windows pode nao levanta-lo sozinho.' + #13#10 + #13#10 +
+             'Detalhes em:' + #13#10 +
+             ExpandConstant('{commonappdata}\Report Studio Agent\logs'),
+             mbError, MB_OK);
+
     Exec(ExpandConstant('{app}\{#ServiceExeName}'), 'start', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
