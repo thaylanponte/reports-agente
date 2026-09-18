@@ -3,10 +3,15 @@
 ; Requer Inno Setup 6+ (https://jrsoftware.org/isinfo.php)
 ;
 ; Como usar:
-;   1. cargo build --release  (ou cross-compile p/ x86_64-pc-windows-gnu)
+;   1. cargo build --release        (alvo nativo x86_64-pc-windows-msvc)
 ;   2. Abrir este .iss no Inno Setup Compiler / ISCC
 ;   3. Compilar
-;   4. O instalador sera gerado em .\Output\ReportStudioAgentSetup.exe
+;   4. O instalador sera gerado em .\Output\
+;
+; O alvo x86_64-pc-windows-gnu foi abandonado: ele exige o MinGW instalado
+; (dlltool.exe), que o `rustup target add` NAO traz, e o alvo nativo compila
+; tudo, odbc-api inclusive. Nao ha subpasta de alvo no caminho abaixo porque
+; build sem --target escreve direto em target\release\.
 ;
 ; O instalador pede URL/Empresa/Token numa tela, grava o agente.toml e ja
 ; instala e inicia o servico. Nao precisa configurar nada na mao depois.
@@ -47,8 +52,8 @@ Name: "{commonappdata}\Report Studio Agent"
 Name: "{commonappdata}\Report Studio Agent\logs"
 
 [Files]
-Source: "target\x86_64-pc-windows-gnu\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
-Source: "target\x86_64-pc-windows-gnu\release\{#ServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "target\release\{#AppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "target\release\{#ServiceExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"
