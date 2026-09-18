@@ -4,7 +4,7 @@ name = "report-studio-agente"
 # (agent.rs) e na linha de subida do log de cada binário. É por ela que se
 # descobre qual máquina recebeu qual build. Bumpar a cada release é obrigatório,
 # senão binário novo e binário velho se reportam iguais.
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 
 [[bin]]
@@ -23,6 +23,8 @@ serde             = { version = "1", features = ["derive"] }
 serde_json        = "1"
 odbc-api          = "8"
 toml              = "0.8"
+data-encoding     = "2"
+sha2              = "0.10"
 eframe            = "0.29"
 chrono            = "0.4"
 rand              = "0.8"

@@ -208,13 +208,7 @@ impl ExecutorConsulta {
             Err(_) => bytes.iter().map(|&b| b as char).collect(),
         };
 
-        if let Ok(n) = texto.parse::<i64>() {
-            JsonValue::from(n)
-        } else if let Ok(n) = texto.parse::<f64>() {
-            JsonValue::from(n)
-        } else {
-            JsonValue::String(texto)
-        }
+        JsonValue::String(texto)
     }
 
     fn ler_cursor(

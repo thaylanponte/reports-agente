@@ -1,5 +1,6 @@
 mod agent;
 mod executor;
+mod gravador;
 mod gui;
 mod shared;
 
@@ -22,6 +23,7 @@ fn main() -> eframe::Result<()> {
         ),
     );
     shared::log_arquivo("INFO", &config.resumo_limites());
+    shared::log_arquivo("INFO", &config.resumo_integracoes());
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

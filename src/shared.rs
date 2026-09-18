@@ -531,6 +531,7 @@ pub struct AgentConfig {
     /// vez — o log sempre tem a resposta atual.
     pub max_consultas: Option<usize>,
     pub max_exportacoes: Option<usize>,
+    pub pasta_integracoes: Option<String>,
 }
 
 impl AgentConfig {
@@ -544,6 +545,41 @@ impl AgentConfig {
 
     pub fn valida(&self) -> bool {
         !self.url.is_empty() && !self.token.is_empty()
+    }
+
+    pub fn pasta_integracoes(&self) -> Option<PathBuf> {
+        self.pasta_integracoes
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
+    /// Linha única para o log de subida, no mesmo espírito de `resumo_limites`:
+    /// sem a pasta, `GravarArquivo` falha para SEMPRE naquela máquina, e hoje
+    /// isso só apareceria quando alguém tentasse enviar.
+    ///
+    /// Ao contrário de `resumo_limites`, esta NÃO é pura: toca o disco. É
+    /// deliberado — a pergunta que o suporte faz é "dá para entregar?", e a
+    /// chave estar preenchida não responde isso. Uma pasta configurada que não
+    /// existe é o modo de falha mais provável, porque o Client da eSales é
+    /// instalado por terceiros e pode não ter criado a pasta ainda.
+    ///
+    /// "PASTA NÃO ENCONTRADA" em caixa alta é para ser greppável: `SharedState`
+    /// grava tudo como INFO (ver a limitação em `SharedState::log`), então não
+    /// há nível que destaque este caso.
+    pub fn resumo_integracoes(&self) -> String {
+        match self.pasta_integracoes() {
+            None => "Integrações: pasta_integracoes ausente — gravação de arquivo indisponível"
+                .to_string(),
+            Some(p) if p.is_dir() => {
+                format!("Integrações: pasta_integracoes = {} (pasta existe)", p.display())
+            }
+            Some(p) => format!(
+                "Integrações: pasta_integracoes = {} — PASTA NÃO ENCONTRADA, a gravação vai falhar",
+                p.display()
+            ),
+        }
     }
 
     /// Limites efetivos. Pura: não loga e não toca em nenhum global.
@@ -648,6 +684,8 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
         max_consultas: Option<usize>,
         #[serde(default)]
         max_exportacoes: Option<usize>,
+        #[serde(default)]
+        pasta_integracoes: Option<String>,
     }
 
     let cfg: Cfg = toml::from_str(conteudo).unwrap_or_default();
@@ -656,6 +694,7 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
     let token_raw = cfg.token.unwrap_or_default();
     let max_consultas = cfg.max_consultas;
     let max_exportacoes = cfg.max_exportacoes;
+    let pasta_integracoes = cfg.pasta_integracoes;
 
     // Formato novo: empresa_id como campo separado
     if let Some(empresa_id) = cfg.empresa_id {
@@ -665,6 +704,7 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
             token: token_raw,
             max_consultas,
             max_exportacoes,
+            pasta_integracoes,
         };
     }
 
@@ -681,6 +721,7 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
         token,
         max_consultas,
         max_exportacoes,
+        pasta_integracoes,
     }
 }
 
@@ -721,6 +762,10 @@ pub fn salvar_config(config: &AgentConfig) {
     }
     if let Some(v) = config.max_exportacoes {
         conteudo.push_str(&format!("max_exportacoes = {v}\n"));
+    }
+    if let Some(p) = &config.pasta_integracoes {
+        let escapado = p.replace('\\', "\\\\").replace('"', "\\\"");
+        conteudo.push_str(&format!("pasta_integracoes = \"{escapado}\"\n"));
     }
 
     let _ = std::fs::write(caminho_config(), conteudo);
@@ -877,6 +922,40 @@ max_consultas = 50
             "Limites: max_consultas=10 (agente.toml, ajustado de 50 — máximo é 10), \
              max_exportacoes=1 (padrão)"
         );
+    }
+
+    #[test]
+    fn resumo_distingue_os_tres_estados_da_pasta() {
+        assert!(AgentConfig::default()
+            .resumo_integracoes()
+            .contains("ausente"));
+
+        let em_branco = AgentConfig {
+            pasta_integracoes: Some("   ".to_string()),
+            ..Default::default()
+        };
+        assert!(em_branco.resumo_integracoes().contains("ausente"));
+
+        let existente = AgentConfig {
+            pasta_integracoes: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let resumo = existente.resumo_integracoes();
+        assert!(resumo.contains("(pasta existe)"));
+        assert!(!resumo.contains("PASTA NÃO ENCONTRADA"));
+
+        let inexistente = AgentConfig {
+            pasta_integracoes: Some(
+                std::env::temp_dir()
+                    .join("rs-agente-pasta-que-nao-existe")
+                    .to_string_lossy()
+                    .to_string(),
+            ),
+            ..Default::default()
+        };
+        let resumo = inexistente.resumo_integracoes();
+        assert!(resumo.contains("PASTA NÃO ENCONTRADA"));
+        assert!(resumo.contains("rs-agente-pasta-que-nao-existe"));
     }
 }
 

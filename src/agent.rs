@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -9,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::executor::ExecutorConsulta;
+use crate::gravador;
 use crate::shared::{LimitesConcorrencia, SharedState, Status};
 
 // Os limites de concorrência (max_consultas / max_exportacoes) NÃO moram aqui:
@@ -56,6 +58,8 @@ const TIMEOUT_AQUISICAO_SECS: u64 = 90;
 /// Prazo para o runtime encerrar antes de a thread do agente desistir dele.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 
+const CAPACIDADES: &[&str] = &["gravar_arquivo", "celulas_texto"];
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
 enum MensagemServidor {
@@ -76,6 +80,11 @@ enum MensagemServidor {
         connection_string: String,
         chunk_size: usize,
     },
+    GravarArquivo {
+        id: String,
+        nome: String,
+        conteudo_b64: String,
+    },
     Ping,
 }
 
@@ -88,6 +97,8 @@ enum MensagemAgente {
         /// (agent_hub.rs:38-39 não tem `deny_unknown_fields`), então isto é
         /// retrocompatível e não precisa esperar rollout do servidor.
         versao: String,
+        #[serde(default)]
+        capacidades: Vec<String>,
     },
     Resultado {
         id: String,
@@ -107,6 +118,12 @@ enum MensagemAgente {
         chunk_idx: usize,
         fim: bool,
     },
+    ArquivoGravado {
+        id: String,
+        caminho: String,
+        sha256: String,
+        bytes: u64,
+    },
     Erro {
         id: String,
         mensagem: String,
@@ -124,6 +141,7 @@ impl AgentHandle {
         url: String,
         token: String,
         limites: LimitesConcorrencia,
+        pasta_integracoes: Option<PathBuf>,
         state: Arc<Mutex<SharedState>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -145,7 +163,7 @@ impl AgentHandle {
 
             rt.block_on(async {
                 tokio::select! {
-                    _ = loop_agente(url, token, limites, state) => {}
+                    _ = loop_agente(url, token, limites, pasta_integracoes, state) => {}
                     _ = shutdown_rx => {}
                 }
             });
@@ -219,6 +237,7 @@ async fn loop_agente(
     url: String,
     token: String,
     limites: LimitesConcorrencia,
+    pasta_integracoes: Option<PathBuf>,
     state: Arc<Mutex<SharedState>>,
 ) {
     // Init do ODBC com retry: se falhar (ex.: subsistema ainda não pronto no boot),
@@ -283,6 +302,7 @@ async fn loop_agente(
                     &MensagemAgente::Autenticar {
                         token: token.clone(),
                         versao: env!("CARGO_PKG_VERSION").to_string(),
+                        capacidades: CAPACIDADES.iter().map(|c| c.to_string()).collect(),
                     },
                 );
                 log(&state, "Autenticado. Aguardando comandos...");
@@ -617,6 +637,52 @@ async fn loop_agente(
                             });
                         }
 
+                        MensagemServidor::GravarArquivo {
+                            id,
+                            nome,
+                            conteudo_b64,
+                        } => {
+                            log(&state, &format!("Gravando arquivo {nome} ({id})..."));
+
+                            let pasta_clone = pasta_integracoes.clone();
+                            let state_clone = state.clone();
+                            let ws_tx_clone = ws_tx.clone();
+
+                            tokio::task::spawn_blocking(move || {
+                                let resposta = match gravador::gravar(
+                                    pasta_clone.as_deref(),
+                                    &id,
+                                    &nome,
+                                    &conteudo_b64,
+                                ) {
+                                    Ok(g) => {
+                                        log(
+                                            &state_clone,
+                                            &format!(
+                                                "Arquivo {id} gravado em {} ({} bytes).",
+                                                g.caminho, g.bytes
+                                            ),
+                                        );
+                                        MensagemAgente::ArquivoGravado {
+                                            id,
+                                            caminho: g.caminho,
+                                            sha256: g.sha256,
+                                            bytes: g.bytes,
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log(
+                                            &state_clone,
+                                            &format!("Erro ao gravar arquivo {id}: {e}"),
+                                        );
+                                        MensagemAgente::Erro { id, mensagem: e }
+                                    }
+                                };
+
+                                enviar(&ws_tx_clone, &resposta);
+                            });
+                        }
+
                         MensagemServidor::Ping => {
                             enviar(&ws_tx, &MensagemAgente::Pong);
                         }
@@ -650,5 +716,64 @@ async fn loop_agente(
         let espera = rand::thread_rng().gen_range(base / 2..=base);
         log(&state, &format!("Reconectando em {espera}s..."));
         tokio::time::sleep(Duration::from_secs(espera)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autenticar_leva_versao_e_capacidades() {
+        let json = serde_json::to_value(MensagemAgente::Autenticar {
+            token: "gdt_x".to_string(),
+            versao: "0.6.0".to_string(),
+            capacidades: CAPACIDADES.iter().map(|c| c.to_string()).collect(),
+        })
+        .unwrap();
+
+        assert_eq!(json["tipo"], "autenticar");
+        assert_eq!(json["token"], "gdt_x");
+        assert_eq!(json["versao"], "0.6.0");
+        assert_eq!(json["capacidades"][0], "gravar_arquivo");
+        assert_eq!(json["capacidades"][1], "celulas_texto");
+    }
+
+    #[test]
+    fn autenticar_de_agente_antigo_sem_capacidades_desserializa() {
+        let msg: MensagemAgente =
+            serde_json::from_str(r#"{"tipo":"autenticar","token":"t","versao":"0.5.0"}"#).unwrap();
+
+        match msg {
+            MensagemAgente::Autenticar { capacidades, .. } => assert!(capacidades.is_empty()),
+            _ => panic!("variante errada"),
+        }
+    }
+
+    #[test]
+    fn gravar_arquivo_desserializa_o_contrato() {
+        let msg: MensagemServidor = serde_json::from_str(
+            r#"{"tipo":"gravar_arquivo","id":"i","nome":"ACC.txt","conteudo_b64":"QQ=="}"#,
+        )
+        .unwrap();
+
+        assert!(matches!(msg, MensagemServidor::GravarArquivo { .. }));
+    }
+
+    #[test]
+    fn arquivo_gravado_serializa_o_contrato() {
+        let json = serde_json::to_value(MensagemAgente::ArquivoGravado {
+            id: "i".to_string(),
+            caminho: r"C:\eSales\Envio\ACC.txt".to_string(),
+            sha256: "abc".to_string(),
+            bytes: 7,
+        })
+        .unwrap();
+
+        assert_eq!(json["tipo"], "arquivo_gravado");
+        assert_eq!(json["id"], "i");
+        assert_eq!(json["caminho"], r"C:\eSales\Envio\ACC.txt");
+        assert_eq!(json["sha256"], "abc");
+        assert_eq!(json["bytes"], 7);
     }
 }

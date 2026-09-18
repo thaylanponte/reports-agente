@@ -148,6 +148,7 @@ pub struct AgentApp {
     // sobreviva a um salvamento pela GUI. Ver AgentConfig::max_consultas.
     max_consultas:    Option<usize>,
     max_exportacoes:  Option<usize>,
+    pasta_integracoes: Option<String>,
 }
 
 impl AgentApp {
@@ -162,6 +163,7 @@ impl AgentApp {
         let mut app = Self {
             max_consultas: config.max_consultas,
             max_exportacoes: config.max_exportacoes,
+            pasta_integracoes: config.pasta_integracoes,
             url: config.url,
             empresa_id: config.empresa_id,
             token: config.token,
@@ -204,6 +206,7 @@ impl AgentApp {
             token: self.token.clone(),
             max_consultas: self.max_consultas,
             max_exportacoes: self.max_exportacoes,
+            pasta_integracoes: self.pasta_integracoes.clone(),
         };
 
         salvar_config(&config);
@@ -221,6 +224,7 @@ impl AgentApp {
             url,
             token_completo,
             config.limites(),
+            config.pasta_integracoes(),
             self.state.clone(),
         ));
     }
@@ -241,6 +245,7 @@ impl AgentApp {
             token: self.token.clone(),
             max_consultas: self.max_consultas,
             max_exportacoes: self.max_exportacoes,
+            pasta_integracoes: self.pasta_integracoes.clone(),
         };
         salvar_config(&config);
 
@@ -293,6 +298,7 @@ impl AgentApp {
                 token: self.token.clone(),
                 max_consultas: self.max_consultas,
                 max_exportacoes: self.max_exportacoes,
+                pasta_integracoes: self.pasta_integracoes.clone(),
             };
 
             if config.valida() {
@@ -457,6 +463,7 @@ impl eframe::App for AgentApp {
                                     token: self.token.clone(),
                                     max_consultas: self.max_consultas,
                                     max_exportacoes: self.max_exportacoes,
+                                    pasta_integracoes: self.pasta_integracoes.clone(),
                                 };
                                 salvar_config(&config);
 

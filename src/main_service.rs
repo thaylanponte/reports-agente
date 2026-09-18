@@ -1,5 +1,6 @@
 mod agent;
 mod executor;
+mod gravador;
 mod service;
 mod shared;
 
@@ -20,6 +21,7 @@ fn main() {
         ),
     );
     shared::log_arquivo("INFO", &config.resumo_limites());
+    shared::log_arquivo("INFO", &config.resumo_integracoes());
 
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(|s| s.as_str()) {
