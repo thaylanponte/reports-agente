@@ -149,6 +149,7 @@ pub struct AgentApp {
     max_consultas:    Option<usize>,
     max_exportacoes:  Option<usize>,
     pasta_integracoes: Option<String>,
+    pasta_neogrid:     Option<String>,
 }
 
 impl AgentApp {
@@ -164,6 +165,7 @@ impl AgentApp {
             max_consultas: config.max_consultas,
             max_exportacoes: config.max_exportacoes,
             pasta_integracoes: config.pasta_integracoes,
+            pasta_neogrid: config.pasta_neogrid,
             url: config.url,
             empresa_id: config.empresa_id,
             token: config.token,
@@ -207,6 +209,7 @@ impl AgentApp {
             max_consultas: self.max_consultas,
             max_exportacoes: self.max_exportacoes,
             pasta_integracoes: self.pasta_integracoes.clone(),
+            pasta_neogrid: self.pasta_neogrid.clone(),
         };
 
         salvar_config(&config);
@@ -224,7 +227,7 @@ impl AgentApp {
             url,
             token_completo,
             config.limites(),
-            config.pasta_integracoes(),
+            config.pastas(),
             self.state.clone(),
         ));
     }
@@ -246,6 +249,7 @@ impl AgentApp {
             max_consultas: self.max_consultas,
             max_exportacoes: self.max_exportacoes,
             pasta_integracoes: self.pasta_integracoes.clone(),
+            pasta_neogrid: self.pasta_neogrid.clone(),
         };
         salvar_config(&config);
 
@@ -299,6 +303,7 @@ impl AgentApp {
                 max_consultas: self.max_consultas,
                 max_exportacoes: self.max_exportacoes,
                 pasta_integracoes: self.pasta_integracoes.clone(),
+                pasta_neogrid: self.pasta_neogrid.clone(),
             };
 
             if config.valida() {
@@ -464,6 +469,7 @@ impl eframe::App for AgentApp {
                                     max_consultas: self.max_consultas,
                                     max_exportacoes: self.max_exportacoes,
                                     pasta_integracoes: self.pasta_integracoes.clone(),
+                                    pasta_neogrid: self.pasta_neogrid.clone(),
                                 };
                                 salvar_config(&config);
 

@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -10,7 +9,7 @@ use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::executor::ExecutorConsulta;
-use crate::gravador;
+use crate::gravador::{self, Destino, Pastas};
 use crate::shared::{LimitesConcorrencia, SharedState, Status};
 
 // Os limites de concorrência (max_consultas / max_exportacoes) NÃO moram aqui:
@@ -58,7 +57,11 @@ const TIMEOUT_AQUISICAO_SECS: u64 = 90;
 /// Prazo para o runtime encerrar antes de a thread do agente desistir dele.
 const SHUTDOWN_TIMEOUT_SECS: u64 = 10;
 
-const CAPACIDADES: &[&str] = &["gravar_arquivo", "celulas_texto"];
+/// `destino_neogrid` é o que libera, no servidor, o envio de `GravarArquivoDestino`
+/// com destino NeoGrid. Uma capacidade por destino, e não uma genérica: o
+/// servidor precisa saber que ESTE agente conhece ESTE destino, porque um
+/// agente que não conhece recusa a mensagem só depois do timeout.
+const CAPACIDADES: &[&str] = &["gravar_arquivo", "celulas_texto", "destino_neogrid"];
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "tipo", rename_all = "snake_case")]
@@ -80,8 +83,24 @@ enum MensagemServidor {
         connection_string: String,
         chunk_size: usize,
     },
+    /// Contrato da 0.6.0: sempre eSales. Continua existindo porque o servidor
+    /// ainda manda a Lactalis por aqui.
     GravarArquivo {
         id: String,
+        nome: String,
+        conteudo_b64: String,
+    },
+    /// Tipo novo, e não um campo `destino` opcional no `GravarArquivo`: a 0.6.0
+    /// ignora campo desconhecido, e um pedido da NeoGrid lido por ela gravaria
+    /// na pasta da eSales, por cima do arquivo de mesmo nome da Lactalis. Com
+    /// tipo novo, agente antigo descarta a mensagem em vez de errar o destino.
+    ///
+    /// `destino` é texto e não `Destino`: chave desconhecida vira `Erro`
+    /// correlacionado em vez de falha de parse, que o servidor só veria como
+    /// timeout.
+    GravarArquivoDestino {
+        id: String,
+        destino: String,
         nome: String,
         conteudo_b64: String,
     },
@@ -141,7 +160,7 @@ impl AgentHandle {
         url: String,
         token: String,
         limites: LimitesConcorrencia,
-        pasta_integracoes: Option<PathBuf>,
+        pastas: Pastas,
         state: Arc<Mutex<SharedState>>,
     ) -> Self {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -163,7 +182,7 @@ impl AgentHandle {
 
             rt.block_on(async {
                 tokio::select! {
-                    _ = loop_agente(url, token, limites, pasta_integracoes, state) => {}
+                    _ = loop_agente(url, token, limites, pastas, state) => {}
                     _ = shutdown_rx => {}
                 }
             });
@@ -233,11 +252,54 @@ fn enviar(tx: &mpsc::UnboundedSender<String>, msg: &MensagemAgente) {
     }
 }
 
+fn gravar_arquivo(
+    destino: Result<Destino, String>,
+    id: String,
+    nome: String,
+    conteudo_b64: String,
+    pastas: &Pastas,
+    state: &Arc<Mutex<SharedState>>,
+    ws_tx: &mpsc::UnboundedSender<String>,
+) {
+    log(state, &format!("Gravando arquivo {nome} ({id})..."));
+
+    let pastas = pastas.clone();
+    let state = state.clone();
+    let ws_tx = ws_tx.clone();
+
+    tokio::task::spawn_blocking(move || {
+        let gravacao = destino.and_then(|d| {
+            gravador::gravar(d, pastas.de(d), &id, &nome, &conteudo_b64)
+        });
+
+        let resposta = match gravacao {
+            Ok(g) => {
+                log(
+                    &state,
+                    &format!("Arquivo {id} gravado em {} ({} bytes).", g.caminho, g.bytes),
+                );
+                MensagemAgente::ArquivoGravado {
+                    id,
+                    caminho: g.caminho,
+                    sha256: g.sha256,
+                    bytes: g.bytes,
+                }
+            }
+            Err(e) => {
+                log(&state, &format!("Erro ao gravar arquivo {id}: {e}"));
+                MensagemAgente::Erro { id, mensagem: e }
+            }
+        };
+
+        enviar(&ws_tx, &resposta);
+    });
+}
+
 async fn loop_agente(
     url: String,
     token: String,
     limites: LimitesConcorrencia,
-    pasta_integracoes: Option<PathBuf>,
+    pastas: Pastas,
     state: Arc<Mutex<SharedState>>,
 ) {
     // Init do ODBC com retry: se falhar (ex.: subsistema ainda não pronto no boot),
@@ -642,45 +704,32 @@ async fn loop_agente(
                             nome,
                             conteudo_b64,
                         } => {
-                            log(&state, &format!("Gravando arquivo {nome} ({id})..."));
+                            gravar_arquivo(
+                                Ok(Destino::Esales),
+                                id,
+                                nome,
+                                conteudo_b64,
+                                &pastas,
+                                &state,
+                                &ws_tx,
+                            );
+                        }
 
-                            let pasta_clone = pasta_integracoes.clone();
-                            let state_clone = state.clone();
-                            let ws_tx_clone = ws_tx.clone();
-
-                            tokio::task::spawn_blocking(move || {
-                                let resposta = match gravador::gravar(
-                                    pasta_clone.as_deref(),
-                                    &id,
-                                    &nome,
-                                    &conteudo_b64,
-                                ) {
-                                    Ok(g) => {
-                                        log(
-                                            &state_clone,
-                                            &format!(
-                                                "Arquivo {id} gravado em {} ({} bytes).",
-                                                g.caminho, g.bytes
-                                            ),
-                                        );
-                                        MensagemAgente::ArquivoGravado {
-                                            id,
-                                            caminho: g.caminho,
-                                            sha256: g.sha256,
-                                            bytes: g.bytes,
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log(
-                                            &state_clone,
-                                            &format!("Erro ao gravar arquivo {id}: {e}"),
-                                        );
-                                        MensagemAgente::Erro { id, mensagem: e }
-                                    }
-                                };
-
-                                enviar(&ws_tx_clone, &resposta);
-                            });
+                        MensagemServidor::GravarArquivoDestino {
+                            id,
+                            destino,
+                            nome,
+                            conteudo_b64,
+                        } => {
+                            gravar_arquivo(
+                                Destino::da_chave(&destino),
+                                id,
+                                nome,
+                                conteudo_b64,
+                                &pastas,
+                                &state,
+                                &ws_tx,
+                            );
                         }
 
                         MensagemServidor::Ping => {
@@ -737,6 +786,7 @@ mod tests {
         assert_eq!(json["versao"], "0.6.0");
         assert_eq!(json["capacidades"][0], "gravar_arquivo");
         assert_eq!(json["capacidades"][1], "celulas_texto");
+        assert_eq!(json["capacidades"][2], "destino_neogrid");
     }
 
     #[test]
@@ -758,6 +808,29 @@ mod tests {
         .unwrap();
 
         assert!(matches!(msg, MensagemServidor::GravarArquivo { .. }));
+    }
+
+    #[test]
+    fn gravar_arquivo_destino_desserializa_o_contrato() {
+        let msg: MensagemServidor = serde_json::from_str(
+            r#"{"tipo":"gravar_arquivo_destino","id":"i","destino":"neogrid","nome":"ACC.txt","conteudo_b64":"QQ=="}"#,
+        )
+        .unwrap();
+
+        match msg {
+            MensagemServidor::GravarArquivoDestino { destino, .. } => {
+                assert_eq!(Destino::da_chave(&destino).unwrap(), Destino::Neogrid)
+            }
+            _ => panic!("variante errada"),
+        }
+    }
+
+    #[test]
+    fn gravar_arquivo_destino_sem_destino_nao_vira_gravar_arquivo() {
+        let msg = serde_json::from_str::<MensagemServidor>(
+            r#"{"tipo":"gravar_arquivo_destino","id":"i","nome":"ACC.txt","conteudo_b64":"QQ=="}"#,
+        );
+        assert!(msg.is_err());
     }
 
     #[test]

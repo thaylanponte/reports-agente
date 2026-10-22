@@ -4,7 +4,7 @@ name = "report-studio-agente"
 # (agent.rs) e na linha de subida do log de cada binário. É por ela que se
 # descobre qual máquina recebeu qual build. Bumpar a cada release é obrigatório,
 # senão binário novo e binário velho se reportam iguais.
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 
 [[bin]]

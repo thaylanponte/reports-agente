@@ -2,6 +2,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
+use crate::gravador::{Destino, Pastas};
+
 pub const SERVICE_NAME: &str = "ReportStudioAgent";
 pub const SERVICE_DISPLAY: &str = "Report Studio Agent";
 
@@ -531,7 +533,30 @@ pub struct AgentConfig {
     /// vez — o log sempre tem a resposta atual.
     pub max_consultas: Option<usize>,
     pub max_exportacoes: Option<usize>,
+    /// Pasta do Client da eSales. O nome genérico é herança da 0.6.0, quando só
+    /// havia esse destino; renomear quebraria o agente.toml das máquinas atuais.
     pub pasta_integracoes: Option<String>,
+    /// Pasta `documents\out` do Client da NeoGrid.
+    pub pasta_neogrid: Option<String>,
+}
+
+fn caminho_preenchido(bruto: &Option<String>) -> Option<PathBuf> {
+    bruto
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+}
+
+fn resumo_pasta(chave: &str, pasta: Option<PathBuf>) -> String {
+    match pasta {
+        None => format!("{chave} ausente — gravação indisponível"),
+        Some(p) if p.is_dir() => format!("{chave} = {} (pasta existe)", p.display()),
+        Some(p) => format!(
+            "{chave} = {} — PASTA NÃO ENCONTRADA, a gravação vai falhar",
+            p.display()
+        ),
+    }
 }
 
 impl AgentConfig {
@@ -547,12 +572,11 @@ impl AgentConfig {
         !self.url.is_empty() && !self.token.is_empty()
     }
 
-    pub fn pasta_integracoes(&self) -> Option<PathBuf> {
-        self.pasta_integracoes
-            .as_deref()
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map(PathBuf::from)
+    pub fn pastas(&self) -> Pastas {
+        Pastas {
+            esales: caminho_preenchido(&self.pasta_integracoes),
+            neogrid: caminho_preenchido(&self.pasta_neogrid),
+        }
     }
 
     /// Linha única para o log de subida, no mesmo espírito de `resumo_limites`:
@@ -562,24 +586,19 @@ impl AgentConfig {
     /// Ao contrário de `resumo_limites`, esta NÃO é pura: toca o disco. É
     /// deliberado — a pergunta que o suporte faz é "dá para entregar?", e a
     /// chave estar preenchida não responde isso. Uma pasta configurada que não
-    /// existe é o modo de falha mais provável, porque o Client da eSales é
-    /// instalado por terceiros e pode não ter criado a pasta ainda.
+    /// existe é o modo de falha mais provável, porque os Clients da eSales e da
+    /// NeoGrid são instalados por terceiros e podem não ter criado a pasta ainda.
     ///
     /// "PASTA NÃO ENCONTRADA" em caixa alta é para ser greppável: `SharedState`
     /// grava tudo como INFO (ver a limitação em `SharedState::log`), então não
     /// há nível que destaque este caso.
     pub fn resumo_integracoes(&self) -> String {
-        match self.pasta_integracoes() {
-            None => "Integrações: pasta_integracoes ausente — gravação de arquivo indisponível"
-                .to_string(),
-            Some(p) if p.is_dir() => {
-                format!("Integrações: pasta_integracoes = {} (pasta existe)", p.display())
-            }
-            Some(p) => format!(
-                "Integrações: pasta_integracoes = {} — PASTA NÃO ENCONTRADA, a gravação vai falhar",
-                p.display()
-            ),
-        }
+        let pastas = self.pastas();
+        format!(
+            "Integrações: {}; {}",
+            resumo_pasta(Destino::Esales.chave_config(), pastas.esales),
+            resumo_pasta(Destino::Neogrid.chave_config(), pastas.neogrid)
+        )
     }
 
     /// Limites efetivos. Pura: não loga e não toca em nenhum global.
@@ -686,6 +705,8 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
         max_exportacoes: Option<usize>,
         #[serde(default)]
         pasta_integracoes: Option<String>,
+        #[serde(default)]
+        pasta_neogrid: Option<String>,
     }
 
     let cfg: Cfg = toml::from_str(conteudo).unwrap_or_default();
@@ -695,6 +716,7 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
     let max_consultas = cfg.max_consultas;
     let max_exportacoes = cfg.max_exportacoes;
     let pasta_integracoes = cfg.pasta_integracoes;
+    let pasta_neogrid = cfg.pasta_neogrid;
 
     // Formato novo: empresa_id como campo separado
     if let Some(empresa_id) = cfg.empresa_id {
@@ -705,6 +727,7 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
             max_consultas,
             max_exportacoes,
             pasta_integracoes,
+            pasta_neogrid,
         };
     }
 
@@ -722,6 +745,7 @@ fn parsear_config(conteudo: &str) -> AgentConfig {
         max_consultas,
         max_exportacoes,
         pasta_integracoes,
+        pasta_neogrid,
     }
 }
 
@@ -763,9 +787,14 @@ pub fn salvar_config(config: &AgentConfig) {
     if let Some(v) = config.max_exportacoes {
         conteudo.push_str(&format!("max_exportacoes = {v}\n"));
     }
-    if let Some(p) = &config.pasta_integracoes {
-        let escapado = p.replace('\\', "\\\\").replace('"', "\\\"");
-        conteudo.push_str(&format!("pasta_integracoes = \"{escapado}\"\n"));
+    for (chave, valor) in [
+        ("pasta_integracoes", &config.pasta_integracoes),
+        ("pasta_neogrid", &config.pasta_neogrid),
+    ] {
+        if let Some(p) = valor {
+            let escapado = p.replace('\\', "\\\\").replace('"', "\\\"");
+            conteudo.push_str(&format!("{chave} = \"{escapado}\"\n"));
+        }
     }
 
     let _ = std::fs::write(caminho_config(), conteudo);
@@ -956,6 +985,38 @@ max_consultas = 50
         let resumo = inexistente.resumo_integracoes();
         assert!(resumo.contains("PASTA NÃO ENCONTRADA"));
         assert!(resumo.contains("rs-agente-pasta-que-nao-existe"));
+    }
+
+    #[test]
+    fn resumo_mostra_os_dois_destinos() {
+        let so_neogrid = AgentConfig {
+            pasta_neogrid: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            ..Default::default()
+        };
+        let resumo = so_neogrid.resumo_integracoes();
+        assert!(resumo.contains("pasta_integracoes ausente"), "{resumo}");
+        assert!(resumo.contains("pasta_neogrid = "), "{resumo}");
+        assert!(resumo.contains("(pasta existe)"), "{resumo}");
+    }
+
+    #[test]
+    fn pastas_le_os_dois_destinos_do_toml() {
+        let cfg = parsear_config(
+            "servidor_url = \"wss://x\"\n\
+             empresa_id   = \"e\"\n\
+             token        = \"t\"\n\
+             pasta_integracoes = 'C:\\eSales\\Envio'\n\
+             pasta_neogrid = \"C:\\\\ngclient-6.0.1\\\\NeoGridClient\\\\documents\\\\out\"\n",
+        );
+        let pastas = cfg.pastas();
+        assert_eq!(pastas.esales, Some(PathBuf::from(r"C:\eSales\Envio")));
+        assert_eq!(
+            pastas.neogrid,
+            Some(PathBuf::from(r"C:\ngclient-6.0.1\NeoGridClient\documents\out"))
+        );
+
+        let sem_neogrid = parsear_config("servidor_url = \"wss://x\"\ntoken = \"t\"\n");
+        assert_eq!(sem_neogrid.pastas().neogrid, None);
     }
 }
 

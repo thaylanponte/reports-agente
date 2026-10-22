@@ -4,12 +4,90 @@ use std::path::{Path, PathBuf};
 use data_encoding::BASE64;
 use sha2::{Digest, Sha256};
 
-/// Contrato externo, não preferência: o Client da eSales só transmite `.txt`.
-/// Recusar o resto impede que um nome vindo do servidor deposite qualquer outra
-/// coisa numa pasta que um programa de terceiro varre sozinho.
+/// Contrato externo, não preferência: o Client da eSales só transmite `.txt`, e
+/// o layout Neogrid DAD também sai em `.txt`. Recusar o resto impede que um
+/// nome vindo do servidor deposite qualquer outra coisa numa pasta que um
+/// programa de terceiro varre sozinho.
 const EXTENSAO: &str = ".txt";
 const NOME_MAX: usize = 255;
 const INVALIDOS: &[char] = &['<', '>', '"', '|', '?', '*'];
+const PASTA_TEMPORARIA: &str = "report-studio-parcial";
+
+/// Programa de terceiro que recolhe o arquivo. Cada um varre a SUA pasta, e a
+/// pasta é configurada por destino no agente.toml.
+///
+/// Os arquivos da NeoGrid saem com o mesmo nome dos da eSales
+/// (`ACC_SELLOUT_AAAAMMDD.txt`), então trocar o destino não falharia: gravaria
+/// por cima da entrega da Lactalis do mesmo dia. Por isso destino desconhecido
+/// é erro, nunca padrão.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Destino {
+    Esales,
+    Neogrid,
+}
+
+impl Destino {
+    pub fn da_chave(chave: &str) -> Result<Destino, String> {
+        match chave {
+            "esales" => Ok(Destino::Esales),
+            "neogrid" => Ok(Destino::Neogrid),
+            outra => Err(format!(
+                "destino de entrega '{outra}' desconhecido por este agente — atualize o agente"
+            )),
+        }
+    }
+
+    pub fn chave_config(self) -> &'static str {
+        match self {
+            Destino::Esales => "pasta_integracoes",
+            Destino::Neogrid => "pasta_neogrid",
+        }
+    }
+
+    /// Onde o temporário é escrito antes do `rename`.
+    ///
+    /// eSales: na própria pasta, com extensão que não é `.txt` — o Client dela
+    /// só recolhe `.txt`, e é assim desde a 0.6.0 em produção.
+    ///
+    /// NeoGrid: numa pasta IRMÃ da de destino. Não há garantia de que o Client
+    /// da NeoGrid filtre por extensão, e se ele recolher tudo o que está na
+    /// `out` levaria o parcial. Irmã, e não subpasta, para não depender de ele
+    /// não varrer recursivamente. Mesmo pai implica mesmo volume, que é o que
+    /// mantém o `rename` atômico.
+    fn pasta_temporaria(self, pasta: &Path) -> Result<PathBuf, String> {
+        match self {
+            Destino::Esales => Ok(pasta.to_path_buf()),
+            Destino::Neogrid => {
+                let pai = pasta.parent().ok_or_else(|| {
+                    format!(
+                        "pasta '{}' não tem pasta-mãe para o arquivo temporário",
+                        pasta.display()
+                    )
+                })?;
+                let temporaria = pai.join(PASTA_TEMPORARIA);
+                std::fs::create_dir_all(&temporaria)
+                    .map_err(|e| format!("falha ao criar '{}': {e}", temporaria.display()))?;
+                Ok(temporaria)
+            }
+        }
+    }
+}
+
+/// Pastas de entrega configuradas, uma por destino.
+#[derive(Debug, Clone, Default)]
+pub struct Pastas {
+    pub esales: Option<PathBuf>,
+    pub neogrid: Option<PathBuf>,
+}
+
+impl Pastas {
+    pub fn de(&self, destino: Destino) -> Option<&Path> {
+        match destino {
+            Destino::Esales => self.esales.as_deref(),
+            Destino::Neogrid => self.neogrid.as_deref(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Gravacao {
@@ -77,13 +155,17 @@ fn dispositivo_dos(nome: &str) -> bool {
 }
 
 pub fn gravar(
+    destino: Destino,
     pasta: Option<&Path>,
     id: &str,
     nome: &str,
     conteudo_b64: &str,
 ) -> Result<Gravacao, String> {
     let pasta = pasta.ok_or_else(|| {
-        "pasta de integrações não configurada: defina pasta_integracoes no agente.toml".to_string()
+        format!(
+            "pasta de integrações não configurada: defina {} no agente.toml",
+            destino.chave_config()
+        )
     })?;
 
     validar_nome(nome)?;
@@ -102,33 +184,44 @@ pub fn gravar(
     // Três invariantes desta escrita que nenhum teste aqui consegue quebrar, e
     // que por isso morrem em silêncio se alguém "arrumar" o código:
     //
-    // 1. O temporário fica na PASTA DE DESTINO. `rename` só é atômico dentro do
-    //    mesmo volume; movê-lo para um spool em %ProgramData% o transformaria em
-    //    copiar-e-apagar, e o Client poderia ver o arquivo crescendo.
-    // 2. A extensão do temporário NÃO pode ser `.txt`. O Client varre a pasta
-    //    por conta própria e recolheria o parcial como se fosse entrega boa.
+    // 1. O temporário fica no MESMO VOLUME do destino (ver `pasta_temporaria`).
+    //    `rename` só é atômico dentro do volume; movê-lo para um spool em
+    //    %ProgramData% o transformaria em copiar-e-apagar, e o Client poderia
+    //    ver o arquivo crescendo.
+    // 2. O temporário nunca é algo que o Client recolha: na eSales a extensão
+    //    não é `.txt`; na NeoGrid ele nem fica na pasta varrida.
     // 3. `sync_all` ANTES do `rename` (ver `escrever`). Invertida a ordem, todo
     //    teste continua passando e só uma queda de energia revela o problema —
     //    um arquivo com o nome final e conteúdo truncado, que é exatamente o
     //    caso que a escrita atômica existe para impedir, e o pior de todos,
-    //    porque o Client entrega e a Lactalis recebe um arquivo vazio como bom.
-    let destino = pasta.join(nome);
-    let temporario = pasta.join(format!("{nome}.{id}.parcial"));
+    //    porque o Client entrega e a indústria recebe um arquivo vazio como bom.
+    let final_ = pasta.join(nome);
+    let temporario = destino
+        .pasta_temporaria(pasta)?
+        .join(format!("{nome}.{id}.parcial"));
 
-    if let Err(e) = escrever(&temporario, &bytes) {
-        let _ = std::fs::remove_file(&temporario);
-        return Err(e);
-    }
+    let conferido = escrever(&temporario, &bytes).and_then(|()| conferir(&temporario));
+    let (sha256, tamanho) = match conferido {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&temporario);
+            return Err(e);
+        }
+    };
 
-    if let Err(e) = std::fs::rename(&temporario, &destino) {
+    if let Err(e) = std::fs::rename(&temporario, &final_) {
         let _ = std::fs::remove_file(&temporario);
         return Err(format!(
             "falha ao renomear para '{}': {e}",
-            destino.display()
+            final_.display()
         ));
     }
 
-    conferir(&destino)
+    Ok(Gravacao {
+        caminho: final_.to_string_lossy().to_string(),
+        sha256,
+        bytes: tamanho,
+    })
 }
 
 fn escrever(temporario: &PathBuf, bytes: &[u8]) -> Result<(), String> {
@@ -150,15 +243,19 @@ fn escrever(temporario: &PathBuf, bytes: &[u8]) -> Result<(), String> {
 /// o significado da confirmação muda. Hash do buffer prova que a rede funcionou;
 /// hash do arquivo relido prova que o disco aceitou, que é a única coisa que o
 /// servidor pode chamar de entregue ao marcar o arquivo como enviado.
-fn conferir(destino: &PathBuf) -> Result<Gravacao, String> {
-    let gravado = std::fs::read(destino)
-        .map_err(|e| format!("falha ao reler '{}': {e}", destino.display()))?;
+///
+/// Relê o TEMPORÁRIO, antes do `rename`, e não o arquivo final. Depois do
+/// `rename` o Client já pode ter recolhido e movido o arquivo; a releitura
+/// falharia, o servidor receberia erro de uma entrega que aconteceu, e a nova
+/// tentativa mandaria o arquivo em dobro para a indústria.
+fn conferir(temporario: &PathBuf) -> Result<(String, u64), String> {
+    let gravado = std::fs::read(temporario)
+        .map_err(|e| format!("falha ao reler '{}': {e}", temporario.display()))?;
 
-    Ok(Gravacao {
-        caminho: destino.to_string_lossy().to_string(),
-        sha256: data_encoding::HEXLOWER.encode(&Sha256::digest(&gravado)),
-        bytes: gravado.len() as u64,
-    })
+    Ok((
+        data_encoding::HEXLOWER.encode(&Sha256::digest(&gravado)),
+        gravado.len() as u64,
+    ))
 }
 
 #[cfg(test)]
@@ -226,15 +323,87 @@ mod tests {
 
     #[test]
     fn pasta_ausente_e_erro_nomeado() {
-        let erro = gravar(None, "id", "ACC.txt", "").unwrap_err();
+        let erro = gravar(Destino::Esales, None, "id", "ACC.txt", "").unwrap_err();
         assert!(erro.contains("pasta_integracoes"));
+
+        let erro = gravar(Destino::Neogrid, None, "id", "ACC.txt", "").unwrap_err();
+        assert!(erro.contains("pasta_neogrid"));
+    }
+
+    #[test]
+    fn destino_desconhecido_e_erro_e_nao_cai_na_esales() {
+        assert_eq!(Destino::da_chave("esales").unwrap(), Destino::Esales);
+        assert_eq!(Destino::da_chave("neogrid").unwrap(), Destino::Neogrid);
+        for chave in ["", "ESALES", "Neogrid", "outro"] {
+            assert!(Destino::da_chave(chave).is_err(), "{chave}");
+        }
+    }
+
+    #[test]
+    fn neogrid_sem_pasta_nao_usa_a_da_esales() {
+        let dir = std::env::temp_dir().join("rs-agente-so-esales");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let pastas = Pastas {
+            esales: Some(dir.clone()),
+            neogrid: None,
+        };
+        let erro = gravar(
+            Destino::Neogrid,
+            pastas.de(Destino::Neogrid),
+            "id",
+            "ACC.txt",
+            &BASE64.encode(b"x"),
+        )
+        .unwrap_err();
+
+        assert!(erro.contains("pasta_neogrid"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn neogrid_grava_na_out_e_parcial_fica_fora_dela() {
+        let raiz = std::env::temp_dir().join("rs-agente-neogrid");
+        let _ = std::fs::remove_dir_all(&raiz);
+        let out = raiz.join("documents").join("out");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let g = gravar(
+            Destino::Neogrid,
+            Some(&out),
+            "id-1",
+            "ACC_SELLOUT_20261022.txt",
+            &BASE64.encode(b"linha\r\n"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            g.caminho,
+            out.join("ACC_SELLOUT_20261022.txt").to_string_lossy()
+        );
+        assert_eq!(std::fs::read(&g.caminho).unwrap(), b"linha\r\n");
+
+        let na_out: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(na_out, vec!["ACC_SELLOUT_20261022.txt".to_string()]);
+
+        let temporaria = raiz.join("documents").join(PASTA_TEMPORARIA);
+        assert!(temporaria.is_dir());
+        assert_eq!(std::fs::read_dir(&temporaria).unwrap().count(), 0);
+
+        let _ = std::fs::remove_dir_all(&raiz);
     }
 
     #[test]
     fn base64_invalido_e_erro_nomeado() {
         let dir = std::env::temp_dir().join("rs-agente-b64");
         std::fs::create_dir_all(&dir).unwrap();
-        let erro = gravar(Some(&dir), "id", "ACC.txt", "!!!nao-e-base64!!!").unwrap_err();
+        let erro = gravar(Destino::Esales, Some(&dir), "id", "ACC.txt", "!!!nao-e-base64!!!").unwrap_err();
         assert!(erro.contains("base64"));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -246,7 +415,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let latin1 = vec![b'A', 0xC7, 0xC3, b'O', b'\r', b'\n'];
-        let g = gravar(Some(&dir), "id-1", "ACC.txt", &BASE64.encode(&latin1)).unwrap();
+        let g = gravar(Destino::Esales, Some(&dir), "id-1", "ACC.txt", &BASE64.encode(&latin1)).unwrap();
 
         assert_eq!(g.bytes, latin1.len() as u64);
         assert_eq!(std::fs::read(&g.caminho).unwrap(), latin1);
@@ -264,8 +433,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        gravar(Some(&dir), "id-1", "ACC.txt", &BASE64.encode(b"velho")).unwrap();
-        let g = gravar(Some(&dir), "id-2", "ACC.txt", &BASE64.encode(b"novo")).unwrap();
+        gravar(Destino::Esales, Some(&dir), "id-1", "ACC.txt", &BASE64.encode(b"velho")).unwrap();
+        let g = gravar(Destino::Esales, Some(&dir), "id-2", "ACC.txt", &BASE64.encode(b"novo")).unwrap();
 
         assert_eq!(std::fs::read(&g.caminho).unwrap(), b"novo");
 

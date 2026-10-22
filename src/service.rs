@@ -556,8 +556,8 @@ fn run_service() -> windows_service::Result<()> {
     let url = config.url.clone();
     let token_completo = config.token_completo();
     let limites = config.limites();
-    let pasta_integracoes = config.pasta_integracoes();
-    let handle = AgentHandle::iniciar(url, token_completo, limites, pasta_integracoes, state);
+    let pastas = config.pastas();
+    let handle = AgentHandle::iniciar(url, token_completo, limites, pastas, state);
 
     status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,

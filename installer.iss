@@ -18,7 +18,7 @@
 ; ============================================================================
 
 #define AppName "Report Studio Agent"
-#define AppVersion "0.6.0"
+#define AppVersion "0.7.0"
 #define AppPublisher "Guidetti Consultoria"
 #define AppExeName "agente.exe"
 #define ServiceExeName "agente-service.exe"
@@ -161,7 +161,7 @@ begin
   end;
 end;
 
-procedure LerConfigExistente(var Url, Empresa, Token, Pasta: String);
+procedure LerConfigExistente(var Url, Empresa, Token, Pasta, PastaNeogrid: String);
 var
   ConfigFile: String;
   Linhas: TArrayOfString;
@@ -181,11 +181,13 @@ begin
     else if Pos('token', L) = 1 then
       Token := ExtrairValor(L)
     else if Pos('pasta_integracoes', L) = 1 then
-      Pasta := ExtrairCaminho(L);
+      Pasta := ExtrairCaminho(L)
+    else if Pos('pasta_neogrid', L) = 1 then
+      PastaNeogrid := ExtrairCaminho(L);
   end;
 end;
 
-{ Coleta as linhas do agente.toml existente que NAO sao as quatro chaves
+{ Coleta as linhas do agente.toml existente que NAO sao as cinco chaves
   geridas por este instalador, devolvendo-as verbatim (comentarios e espacamento
   inclusive) para serem reanexadas ao arquivo novo.
 
@@ -197,7 +199,8 @@ end;
 
   LIMITACAO CONHECIDA: a deteccao usa Pos(chave, L) = 1, a mesma convencao de
   LerConfigExistente. Uma chave futura que COMECE com 'servidor_url',
-  'empresa_id', 'token' ou 'pasta_integracoes' — 'token_backup', por exemplo —
+  'empresa_id', 'token', 'pasta_integracoes' ou 'pasta_neogrid' —
+  'token_backup', por exemplo —
   seria considerada gerida por este instalador e portanto descartada. A convencao
   foi mantida por coerencia com o resto do arquivo; se surgir uma chave assim, os
   dois lugares precisam mudar juntos. }
@@ -219,6 +222,7 @@ begin
     if Pos('empresa_id', L) = 1 then Continue;
     if Pos('token', L) = 1 then Continue;
     if Pos('pasta_integracoes', L) = 1 then Continue;
+    if Pos('pasta_neogrid', L) = 1 then Continue;
     { Linha original, nao a trimada: preserva indentacao e alinhamento. }
     Result := Result + Linhas[i] + #13#10;
   end;
@@ -279,7 +283,7 @@ end;
 
 procedure InitializeWizard;
 var
-  Url, Empresa, Token, Pasta: String;
+  Url, Empresa, Token, Pasta, PastaNeogrid: String;
 begin
   PaginaConfig := CreateInputQueryPage(
     wpSelectTasks,
@@ -289,14 +293,16 @@ begin
   PaginaConfig.Add('URL do Servidor:', False);
   PaginaConfig.Add('ID da Empresa:', False);
   PaginaConfig.Add('Token do Agente:', False);
-  PaginaConfig.Add('Pasta de Integracoes (opcional):', False);
+  PaginaConfig.Add('Pasta de Integracoes eSales (opcional):', False);
+  PaginaConfig.Add('Pasta de Integracoes NeoGrid (opcional):', False);
 
   // Prefill: usa o que ja estiver instalado; senao, a URL padrao.
   Url := '{#DefaultUrl}';
   Empresa := '';
   Token := '';
   Pasta := '';
-  LerConfigExistente(Url, Empresa, Token, Pasta);
+  PastaNeogrid := '';
+  LerConfigExistente(Url, Empresa, Token, Pasta, PastaNeogrid);
   if Trim(Url) = '' then
     Url := '{#DefaultUrl}';
   { O sugerido entra SO' em instalacao nova, detectada pela ausencia do
@@ -314,6 +320,9 @@ begin
   PaginaConfig.Values[1] := Empresa;
   PaginaConfig.Values[2] := Token;
   PaginaConfig.Values[3] := Pasta;
+  { Sem sugestao, nem em instalacao nova: a maioria das maquinas nao tem o
+    Client da NeoGrid, e o caminho dele carrega a versao (ngclient-6.0.1). }
+  PaginaConfig.Values[4] := PastaNeogrid;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -354,7 +363,7 @@ end;
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ConfigDir, ConfigFile, Conteudo, Extras: String;
-  Url, Empresa, Token, Pasta: String;
+  Url, Empresa, Token, Pasta, PastaNeogrid: String;
   ResultCode: Integer;
 begin
   if CurStep <> ssPostInstall then
@@ -364,6 +373,7 @@ begin
   Empresa := Trim(PaginaConfig.Values[1]);
   Token := Trim(PaginaConfig.Values[2]);
   Pasta := Trim(PaginaConfig.Values[3]);
+  PastaNeogrid := Trim(PaginaConfig.Values[4]);
 
   if Url = '' then
     Url := '{#DefaultUrl}';
@@ -386,6 +396,9 @@ begin
     if Pasta <> '' then
       Conteudo := Conteudo +
         'pasta_integracoes = "' + EscaparToml(Pasta) + '"' + #13#10;
+    if PastaNeogrid <> '' then
+      Conteudo := Conteudo +
+        'pasta_neogrid = "' + EscaparToml(PastaNeogrid) + '"' + #13#10;
     Conteudo := Conteudo + Extras;
     SaveStringToFile(ConfigFile, Conteudo, False);
   end;
