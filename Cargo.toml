@@ -4,16 +4,29 @@ name = "report-studio-agente"
 # (agent.rs) e na linha de subida do log de cada binário. É por ela que se
 # descobre qual máquina recebeu qual build. Bumpar a cada release é obrigatório,
 # senão binário novo e binário velho se reportam iguais.
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 
 [[bin]]
 name = "agente"
 path = "src/main.rs"
+required-features = ["gui"]
 
 [[bin]]
 name = "agente-service"
 path = "src/main_service.rs"
+
+# Agente na nuvem (Linux, sem janela): roda no servidor do Report e atende clientes com banco na
+# nuvem (DataCISS), que não têm máquina na rede do banco. Uma conexão por empresa no mesmo processo.
+# Build: cargo build --release --no-default-features --bin agente-nuvem (ver Dockerfile.nuvem).
+[[bin]]
+name = "agente-nuvem"
+path = "src/main_nuvem.rs"
+
+[features]
+default = ["gui"]
+# A janela só existe no Windows; no Linux o eframe nem precisa compilar.
+gui = ["dep:eframe"]
 
 [dependencies]
 tokio             = { version = "1", features = ["full"] }
@@ -25,7 +38,7 @@ odbc-api          = "8"
 toml              = "0.8"
 data-encoding     = "2"
 sha2              = "0.10"
-eframe            = "0.29"
+eframe            = { version = "0.29", optional = true }
 chrono            = "0.4"
 rand              = "0.8"
 

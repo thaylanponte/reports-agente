@@ -1,0 +1,27 @@
+# Agente na nuvem: roda no servidor do Report e conecta no DB2 dos clientes com banco na nuvem (DataCISS).
+# Driver: IBM Data Server Driver for ODBC and CLI (clidriver), registrado no unixODBC com o MESMO nome
+# que o servidor usa na string de conexão ("IBM DB2 ODBC DRIVER"), então nada muda no Report.
+
+FROM rust:1-bookworm AS build
+RUN apt-get update && apt-get install -y --no-install-recommends unixodbc-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN cargo build --release --no-default-features --bin agente-nuvem
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends unixodbc libxml2 ca-certificates curl \
+ && curl -fsSL https://public.dhe.ibm.com/ibmdl/export/pub/software/data/db2/drivers/odbc_cli/linuxx64_odbc_cli.tar.gz \
+    | tar -xz -C /opt \
+ && apt-get purge -y curl && apt-get autoremove -y && rm -rf /var/lib/apt/lists/* \
+ && printf '[IBM DB2 ODBC DRIVER]\nDescription=IBM DB2 ODBC/CLI\nDriver=/opt/clidriver/lib/libdb2.so\n' > /etc/odbcinst.ini \
+ && useradd --system --create-home --home-dir /var/lib/agente agente
+# DB2CODEPAGE: UTF-8 entre o driver e o agente (sem isso acento chega quebrado).
+# AGENTE_DB2_LINUX: peculiaridades do driver da IBM no Linux (indicador de 4 bytes, cursor que fecha sozinho); ver executor.rs.
+ENV DB2CODEPAGE=1208 \
+    AGENTE_DB2_LINUX=1 \
+    LD_LIBRARY_PATH=/opt/clidriver/lib \
+    ProgramData=/var/lib/agente
+COPY --from=build /src/target/release/agente-nuvem /usr/local/bin/agente-nuvem
+USER agente
+CMD ["agente-nuvem"]

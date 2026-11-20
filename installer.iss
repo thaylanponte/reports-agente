@@ -18,7 +18,7 @@
 ; ============================================================================
 
 #define AppName "Report Studio Agent"
-#define AppVersion "0.7.0"
+#define AppVersion "0.7.1"
 #define AppPublisher "Guidetti Consultoria"
 #define AppExeName "agente.exe"
 #define ServiceExeName "agente-service.exe"
@@ -255,7 +255,12 @@ end;
   logs dependeria da politica "Bypass traverse checking" — padrao no Windows,
   mas desligavel por GPO, e o sintoma seria o log da GUI sumir sem erro. X sem
   RD deixa passar por dentro sem listar a pasta nem ler o agente.toml, que e' o
-  arquivo com o token. }
+  arquivo com o token.
+
+  (X) ENTRE PARENTESES: o icacls so' aceita sem parenteses os direitos
+  simples (F, M, RX, R, W, D, N). X e' direito especifico, e ':X' cru faz o
+  icacls recusar o comando INTEIRO com codigo 87 — nada e' aplicado, nem o
+  /inheritance:r. Foi o que a 0.7.0 fez em campo. }
 procedure AplicarPermissoes();
 var
   Pasta, Logs, Falhas: String;
@@ -268,7 +273,7 @@ begin
     + ' /remove:g *S-1-1-0 /remove:g *S-1-5-11'
     + ' /grant:r *S-1-5-32-544:(OI)(CI)F'
     + ' /grant:r *S-1-5-18:(OI)(CI)F'
-    + ' /grant:r *S-1-5-32-545:X', Falhas);
+    + ' /grant:r *S-1-5-32-545:(X)', Falhas);
 
   ExecIcacls('"' + Logs + '" /grant:r *S-1-5-32-545:(OI)(CI)M', Falhas);
 
